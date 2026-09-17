@@ -1,4 +1,4 @@
-//v0.61
+//v0.62
 // Literal strings
 const char *html_footer = R"literal(
   <footer>

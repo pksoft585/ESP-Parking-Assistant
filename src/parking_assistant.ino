@@ -27,7 +27,7 @@
 #include <DNSServer.h>                  //Captive portal DNS server (for auto-launching: only works on some devices/operating systems)
 #include <Update.h>
 
-#define VERSION "v0.61"
+#define VERSION "v0.62"
 // =======================
 //  GPIO PINS
 // =======================
@@ -339,6 +339,7 @@ void reconnect();
 bool reconnect_soft();
 bool mqttIsConnected();
 //LED and Display Functions
+void setupFastLED(byte ledData_Pin);
 void defineEffects();
 void allLEDsOff(bool resumeSleep = false);
 void blinkLEDs(CRGB color);
@@ -455,7 +456,7 @@ void setup() {
       // -------------
       // SETUP FASTLED  
       // -------------
-      FastLED.addLeds<WS2812B, LED_DATA_PIN, GRB>(LEDs, NUM_LEDS_MAX);
+      setupFastLED(ledData_Pin);
       FastLED.setDither(false);
       FastLED.setCorrection(TypicalLEDStrip);
       FastLED.setMaxPowerInVoltsAndMilliamps(5, milliamps);
@@ -1125,6 +1126,32 @@ String getDiscoveryConfig() {
     fileContents = "ERROR RETURNED: Failed to mount LittleFS - See Troubleshooting.";
   }
   return fileContents;
+}
+
+void setupFastLED(byte pin) {
+  switch (pin) {
+    case 1:  FastLED.addLeds<WS2812B, 1,  GRB>(LEDs, NUM_LEDS_MAX); break;
+    case 2:  FastLED.addLeds<WS2812B, 2,  GRB>(LEDs, NUM_LEDS_MAX); break; 
+    case 4:  FastLED.addLeds<WS2812B, 4,  GRB>(LEDs, NUM_LEDS_MAX); break;
+    case 5:  FastLED.addLeds<WS2812B, 5,  GRB>(LEDs, NUM_LEDS_MAX); break;
+    case 12: FastLED.addLeds<WS2812B, 12, GRB>(LEDs, NUM_LEDS_MAX); break;
+    case 13: FastLED.addLeds<WS2812B, 13, GRB>(LEDs, NUM_LEDS_MAX); break;
+    case 14: FastLED.addLeds<WS2812B, 14, GRB>(LEDs, NUM_LEDS_MAX); break;
+    case 15: FastLED.addLeds<WS2812B, 15, GRB>(LEDs, NUM_LEDS_MAX); break;
+    case 16: FastLED.addLeds<WS2812B, 16, GRB>(LEDs, NUM_LEDS_MAX); break;
+    case 17: FastLED.addLeds<WS2812B, 17, GRB>(LEDs, NUM_LEDS_MAX); break;
+    case 18: FastLED.addLeds<WS2812B, 18, GRB>(LEDs, NUM_LEDS_MAX); break;
+    case 19: FastLED.addLeds<WS2812B, 19, GRB>(LEDs, NUM_LEDS_MAX); break;
+    case 21: FastLED.addLeds<WS2812B, 21, GRB>(LEDs, NUM_LEDS_MAX); break;
+    case 22: FastLED.addLeds<WS2812B, 22, GRB>(LEDs, NUM_LEDS_MAX); break;
+    case 23: FastLED.addLeds<WS2812B, 23, GRB>(LEDs, NUM_LEDS_MAX); break;
+    case 25: FastLED.addLeds<WS2812B, 25, GRB>(LEDs, NUM_LEDS_MAX); break;
+    case 26: FastLED.addLeds<WS2812B, 26, GRB>(LEDs, NUM_LEDS_MAX); break;
+    case 27: FastLED.addLeds<WS2812B, 27, GRB>(LEDs, NUM_LEDS_MAX); break;
+    case 32: FastLED.addLeds<WS2812B, 32, GRB>(LEDs, NUM_LEDS_MAX); break;
+    case 33: FastLED.addLeds<WS2812B, 33, GRB>(LEDs, NUM_LEDS_MAX); break;    
+    default: FastLED.addLeds<WS2812B, 19, GRB>(LEDs, NUM_LEDS_MAX); break;
+  }
 }
 
 // ==============================
