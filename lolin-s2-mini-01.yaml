@@ -1,0 +1,926 @@
+substitutions:
+  device_name: lolin-s2-mini-01
+  friendly_name: ESP Parking Assistant
+  led_pin: GPIO9
+  trigger_pin: GPIO11
+  echo_pin: GPIO35
+  user_led: GPIO15
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+  comment: Lolin ESP32-S2 Mini-01 IoT DIY ESP Parking Assistant
+  on_boot:
+    - priority: -100
+      then:
+        # Start the LED effect after all components have initialized.
+        - delay: 100ms
+        - light.turn_on:
+            id: led_strip
+            effect: "Parking Assistant"
+            brightness: 100%
+        - delay: 2500ms
+        - lambda: |-
+            id(boot_animation) = false;
+            id(is_awake) = false;
+            id(exit_sleep_timer_started) = false;
+            id(park_sleep_timer_started) = false;
+        - lambda: |-
+            // Enter standby after the boot indication.
+            id(led_output_brightness) = -1;
+            
+esp32:
+  board: lolin_s2_mini
+  variant: esp32s2
+  flash_size: 4MB
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      CONFIG_LWIP_MAX_SOCKETS: "13"
+
+logger:
+  level: INFO
+
+api:
+  encryption:
+    key: "*****"
+  reboot_timeout: 0s
+
+ota:
+  - platform: esphome
+    encryption:
+  - platform: web_server
+
+wifi:
+  networks:
+  - ssid: !secret wifi_ssid
+    password: !secret wifi_password
+  fast_connect: true
+  min_auth_mode: WPA2
+  power_save_mode: none
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+#  ap:
+#    ssid: "ESP Parking Assistant Fallback"
+#    password: !secret wifi_ap_password
+
+#captive_portal:
+
+web_server:
+  port: 80
+  log: off
+  version: 3
+  local: true
+#  ota: false
+  sorting_groups:
+    - id: pa_status
+      name: "Parking Assistant"
+      sorting_weight: 10
+    - id: pa_distances
+      name: "Distances"
+      sorting_weight: 20
+    - id: pa_strip
+      name: "LED Strip"
+      sorting_weight: 30
+    - id: pa_led
+      name: "LED Settings"
+      sorting_weight: 40
+    - id: pa_colors
+      name: "LED Colors"
+      sorting_weight: 50
+    - id: pa_timing
+      name: "Timing"
+      sorting_weight: 60
+    - id: pa_actions
+      name: "Actions"
+      sorting_weight: 70
+
+preferences:
+  flash_write_interval: 1min
+
+globals:
+  # State machine ---------------------------------------------------------
+  - id: car_detected_state
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+  - id: is_awake
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+  - id: cold_start
+    type: bool
+    restore_value: no
+    initial_value: 'true'
+
+  - id: previous_door_state
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+  - id: car_detected_counter
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+  - id: no_car_detected_counter
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+  - id: exit_sleep_timer_started
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+  - id: park_sleep_timer_started
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+  - id: start_time_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+
+  # LED state -------------------------------------------------------------
+  - id: boot_animation
+    type: bool
+    restore_value: no
+    initial_value: 'true'
+
+  - id: blink_on
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+  # -1 means that the output brightness has not yet been applied.
+  - id: led_output_brightness
+    type: int
+    restore_value: no
+    initial_value: '-1'
+
+  # Five-sample median filter for the value published to Home Assistant.
+  - id: distance_samples
+    type: float[5]
+    restore_value: no
+    initial_value: '{0, 0, 0, 0, 0}'
+
+  - id: distance_sample_count
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+  - id: distance_sample_index
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+  - id: distance_publish_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+
+binary_sensor:
+ #  Status
+  - platform: status
+    name: "PA Status"
+    id: pa_status_bs
+    icon: mdi:check-circle-outline
+#    internal: true
+    web_server:
+      sorting_weight: 70
+      sorting_group_id: pa_status
+
+  - platform: template
+    id: car_detected
+    name: "PA Car Detected"
+    icon: mdi:car-outline
+    device_class: presence
+    entity_category: diagnostic
+    web_server:
+      sorting_group_id: pa_status
+      sorting_weight: 10
+    lambda: |-
+      return id(car_detected_state);
+
+sensor:
+  # Uptime Sensor
+  - platform: uptime
+    name: "PA Uptime"
+    id: pa_uptime
+    update_interval: 15s
+    web_server:
+      sorting_weight: 80
+      sorting_group_id: pa_status
+
+  # Raw HC-SR04 measurement. ESPHome returns meters; the parking logic uses mm.
+  - platform: ultrasonic
+    id: parking_distance_raw
+    internal: true
+    trigger_pin: ${trigger_pin}
+    echo_pin: ${echo_pin}
+    update_interval: 200ms
+    timeout: 3.0m
+    unit_of_measurement: "mm"
+    device_class: distance
+    state_class: measurement
+    accuracy_decimals: 0
+    filters:
+      - lambda: |-
+          if (isnan(x)) {
+            return id(sensor_max_distance).state;
+          }
+          float mm = x * 1000.0f;
+          float min_mm = id(sensor_min_distance).state;
+          float max_mm = id(sensor_max_distance).state;
+          if (mm < min_mm) mm = min_mm;
+          if (mm > max_mm) mm = max_mm;
+          return mm;
+
+  - platform: template
+    id: parking_distance
+    name: "PA Parking Distance"
+    icon: mdi:align-horizontal-distribute
+    unit_of_measurement: "mm"
+    device_class: distance
+    state_class: measurement
+    accuracy_decimals: 0
+    web_server:
+      sorting_group_id: pa_status
+      sorting_weight: 20
+
+  # Wifi Signal Sensor
+  - platform: wifi_signal
+    name: "PA Wifi signal"
+    id: pa_wifi_signal
+    icon: mdi:wifi
+    update_interval: 60s
+    unit_of_measurement: "dBm"
+    accuracy_decimals: 0
+    entity_category: "diagnostic"
+    web_server:
+      sorting_weight: 90
+      sorting_group_id: pa_status
+  - platform: copy # WiFi signal strength in %
+    name: "PA Wifi signal (%)"
+    id: pa_wifi_signal_prct
+    icon: mdi:wifi
+    source_id: pa_wifi_signal
+    filters:
+      - lambda: return min(max(2 * (x + 100.0), 0.0), 100.0);
+    unit_of_measurement: "%"
+    entity_category: "diagnostic"
+    device_class: ""
+    web_server:
+      sorting_weight: 95
+      sorting_group_id: pa_status
+ 
+number:
+  # LED configuration -----------------------------------------------------
+  - platform: template
+    name: "PA Number of LEDs"
+    id: led_count
+    icon: mdi:counter
+    entity_category: config
+    min_value: 1
+    max_value: 30
+    step: 1
+    initial_value: 30
+    optimistic: true
+    restore_value: true
+    web_server:
+      sorting_group_id: pa_led
+      sorting_weight: 10
+
+  - platform: template
+    name: "PA Active LED Brightness"
+    id: active_brightness
+    icon: mdi:sun-clock-outline
+    entity_category: config
+    min_value: 0
+    max_value: 255
+    step: 1
+    initial_value: 100
+    optimistic: true
+    restore_value: true
+    web_server:
+      sorting_group_id: pa_led
+      sorting_weight: 20
+
+  - platform: template
+    name: "PA Standby LED Brightness"
+    id: sleep_brightness
+    icon: mdi:sun-clock
+    entity_category: config
+    min_value: 0
+    max_value: 255
+    step: 1
+    initial_value: 5
+    optimistic: true
+    restore_value: true
+    web_server:
+      sorting_group_id: pa_led
+      sorting_weight: 30
+
+  # Parking distances -----------------------------------------------------
+  - platform: template
+    name: "PA Wake Distance"
+    id: wake_distance
+    icon: mdi:arrow-expand-horizontal
+    unit_of_measurement: "mm"
+    entity_category: config
+    min_value: 35
+    max_value: 2600
+    step: 1
+    initial_value: 2500
+    optimistic: true
+    restore_value: true
+    web_server:
+      sorting_group_id: pa_distances
+      sorting_weight: 10
+
+  - platform: template
+    name: "PA Active Distance"
+    id: start_distance
+    icon: mdi:arrow-expand-horizontal
+    unit_of_measurement: "mm"
+    entity_category: config
+    min_value: 35
+    max_value: 2600
+    step: 1
+    initial_value: 1550
+    optimistic: true
+    restore_value: true
+    web_server:
+      sorting_group_id: pa_distances
+      sorting_weight: 20
+
+  - platform: template
+    name: "PA Parked Distance"
+    id: park_distance
+    icon: mdi:arrow-expand-horizontal
+    unit_of_measurement: "mm"
+    entity_category: config
+    min_value: 35
+    max_value: 2600
+    step: 1
+    initial_value: 560
+    optimistic: true
+    restore_value: true
+    web_server:
+      sorting_group_id: pa_distances
+      sorting_weight: 30
+
+  - platform: template
+    name: "PA Backup Distance"
+    id: backup_distance
+    icon: mdi:arrow-expand-horizontal
+    unit_of_measurement: "mm"
+    entity_category: config
+    min_value: 35
+    max_value: 2600
+    step: 1
+    initial_value: 460
+    optimistic: true
+    restore_value: true
+    web_server:
+      sorting_group_id: pa_distances
+      sorting_weight: 40
+
+  - platform: template
+    name: "PA Sensor Minimum Distance"
+    id: sensor_min_distance
+    icon: mdi:arrow-expand-horizontal
+    unit_of_measurement: "mm"
+    entity_category: config
+    min_value: 35
+    max_value: 1000
+    step: 1
+    initial_value: 50
+    optimistic: true
+    restore_value: true
+    web_server:
+      sorting_group_id: pa_distances
+      sorting_weight: 50
+
+  - platform: template
+    name: "PA Sensor Maximum Distance"
+    id: sensor_max_distance
+    icon: mdi:arrow-expand-horizontal
+    unit_of_measurement: "mm"
+    entity_category: config
+    min_value: 1000
+    max_value: 2600
+    step: 1
+    initial_value: 2600
+    optimistic: true
+    restore_value: true
+    web_server:
+      sorting_group_id: pa_distances
+      sorting_weight: 60
+
+  # Active timeouts -------------------------------------------------------
+  - platform: template
+    name: "PA Active Park Time"
+    id: max_operation_time_park
+    icon: mdi:timer-settings-outline
+    unit_of_measurement: "s"
+    entity_category: config
+    min_value: 0
+    max_value: 300
+    step: 1
+    initial_value: 60
+    optimistic: true
+    restore_value: true
+    web_server:
+      sorting_group_id: pa_timing
+      sorting_weight: 10
+
+  - platform: template
+    name: "PA Active Exit Time"
+    id: max_operation_time_exit
+    icon: mdi:timer-settings
+    unit_of_measurement: "s"
+    entity_category: config
+    min_value: 0
+    max_value: 300
+    step: 1
+    initial_value: 5
+    optimistic: true
+    restore_value: true
+    web_server:
+      sorting_group_id: pa_timing
+      sorting_weight: 20
+
+select:
+  # LED colors ------------------------------------------------------------
+  - platform: template
+    name: "PA Wake Color"
+    id: wake_color
+    icon: mdi:palette-outline
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_option: Green
+    options:
+      - Red
+      - Yellow
+      - Green
+      - Blue
+      - White
+      - Pink
+      - Orange
+      - Lime
+      - Cyan
+      - Gray
+    web_server:
+      sorting_group_id: pa_colors
+      sorting_weight: 10
+
+  - platform: template
+    name: "PA Active Color"
+    id: active_color
+    icon: mdi:palette-outline
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_option: White
+    options:
+      - Red
+      - Yellow
+      - Green
+      - Blue
+      - White
+      - Pink
+      - Orange
+      - Lime
+      - Cyan
+      - Gray
+    web_server:
+      sorting_group_id: pa_colors
+      sorting_weight: 20
+
+  - platform: template
+    name: "PA Parked Color"
+    id: parked_color
+    icon: mdi:palette-outline
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_option: Red
+    options:
+      - Red
+      - Yellow
+      - Green
+      - Blue
+      - White
+      - Pink
+      - Orange
+      - Lime
+      - Cyan
+      - Gray
+    web_server:
+      sorting_group_id: pa_colors
+      sorting_weight: 30
+
+  - platform: template
+    name: "PA Backup Color"
+    id: backup_color
+    icon: mdi:palette-outline
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_option: Red
+    options:
+      - Red
+      - Yellow
+      - Green
+      - Blue
+      - White
+      - Pink
+      - Orange
+      - Lime
+      - Cyan
+      - Gray
+    web_server:
+      sorting_group_id: pa_colors
+      sorting_weight: 40
+
+  - platform: template
+    name: "PA Standby Color"
+    id: standby_color
+    icon: mdi:palette-outline
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_option: Blue
+    options:
+      - Red
+      - Yellow
+      - Green
+      - Blue
+      - White
+      - Pink
+      - Orange
+      - Lime
+      - Cyan
+      - Gray
+    web_server:
+      sorting_group_id: pa_colors
+      sorting_weight: 50
+
+  - platform: template
+    name: "PA LED Effect"
+    id: led_effect
+    icon: mdi:led-on
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_option: Out-In
+    options:
+      - Out-In
+      - In-Out
+      - Full-Strip
+      - Full-Strip-Inv
+      - Solid
+    web_server:
+      sorting_group_id: pa_led
+      sorting_weight: 40
+
+switch:
+  # Restarts
+  - platform: restart
+    name: "PA Restart"
+    id: pa_restart_switch
+    web_server:
+      sorting_weight: 10
+      sorting_group_id: pa_actions
+  - platform: safe_mode
+    name: "PA Restart (Safe Mode)"
+    id: pa_safe_mode_switch
+    entity_category: config
+    web_server:
+      sorting_weight: 20
+      sorting_group_id: pa_actions
+      
+  # This replaces the old MQTT cmnd/parkasst/door switch.
+  - platform: template
+    name: "PA Door State"
+    id: door_state
+    icon: mdi:garage
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    entity_category: config
+    web_server:
+      sorting_group_id: pa_status
+      sorting_weight: 30
+    on_turn_on:
+      - lambda: |-
+          // Door state only controls the parking LED state machine.
+          // Car detection continues independently.
+          if (id(car_detected_state)) {
+            id(is_awake) = true;
+            id(exit_sleep_timer_started) = false;
+            id(park_sleep_timer_started) = true;
+            id(start_time_ms) = millis();
+          }
+      - light.turn_on: pa_user_led
+    on_turn_off:
+      - lambda: |-
+          // Keep Car Detected running, but put the parking LEDs into standby.
+          id(is_awake) = false;
+          id(exit_sleep_timer_started) = false;
+          id(park_sleep_timer_started) = false;
+      - light.turn_off: pa_user_led
+
+output:
+  - platform: gpio
+    pin:
+      number: ${user_led}
+      id: pa_user_led_gpio
+
+light:
+  - platform: binary
+    name: "PA User LED"
+    id: pa_user_led
+    icon: mdi:led-outline
+    output: pa_user_led_gpio
+
+  - platform: esp32_rmt_led_strip
+    name: "PA LED Strip"
+    id: led_strip
+    pin: GPIO9
+    num_leds: 30
+    icon: mdi:led-strip-variant
+    chipset: WS2812
+    channel_colors: GRB
+    max_refresh_rate: 20ms
+    default_transition_length: 0s
+    restore_mode: ALWAYS_OFF
+    effects:
+      - addressable_lambda:
+          name: "Parking Assistant"
+          update_interval: 20ms
+          lambda: |-
+            const int n = std::max(1, std::min(30, (int) id(led_count).state));
+
+            auto get_color = [](const std::string &name) -> Color {
+              if (name == "Red")    return Color(255, 0, 0);
+              if (name == "Yellow") return Color(255, 255, 0);
+              if (name == "Green")  return Color(0, 255, 0);
+              if (name == "Blue")   return Color(0, 0, 255);
+              if (name == "White")  return Color(255, 255, 255);
+              if (name == "Pink")   return Color(255, 105, 180);
+              if (name == "Orange") return Color(255, 165, 0);
+              if (name == "Lime")   return Color(50, 205, 50);
+              if (name == "Cyan")   return Color(0, 255, 255);
+              if (name == "Gray")   return Color(128, 128, 128);
+              return Color(0, 0, 0);
+            };
+
+            const Color c_standby = get_color(std::string(id(standby_color).current_option()));
+            const Color c_wake    = get_color(std::string(id(wake_color).current_option()));
+            const Color c_active  = get_color(std::string(id(active_color).current_option()));
+            const Color c_parked  = get_color(std::string(id(parked_color).current_option()));
+            const Color c_backup  = get_color(std::string(id(backup_color).current_option()));
+
+            // Always clear the complete physical strip first. This is important
+            // when the configured number of LEDs is reduced.
+            for (int i = 0; i < it.size(); i++) {
+              it[i] = Color(0, 0, 0);
+            }
+
+            // Boot indication: yellow/green checkerboard.
+            if (id(boot_animation)) {
+              for (int i = 0; i < n; i += 2) {
+                it[i] = Color(255, 255, 0);
+                if (i + 1 < n) {
+                  it[i + 1] = Color(0, 255, 0);
+                }
+              }
+              return;
+            }
+
+            const float distance = id(parking_distance_raw).state;
+            const float wake = id(wake_distance).state;
+            const float start = id(start_distance).state;
+            const float park = id(park_distance).state;
+            const float backup = id(backup_distance).state;
+            const int half = std::max(1, n / 2);
+
+            // Standby: only the two edge LEDs are lit.
+            if (!id(car_detected_state) || !id(is_awake)) {
+              if (id(sleep_brightness).state > 0) {
+                it[0] = c_standby;
+                it[n - 1] = c_standby;
+              }
+              return;
+            }
+
+            // Backup: flashing full strip.
+            if (distance <= backup) {
+              if (id(blink_on)) {
+                for (int i = 0; i < n; i++) it[i] = c_backup;
+              }
+              return;
+            }
+
+            // Parked: full strip.
+            if (distance <= park) {
+              for (int i = 0; i < n; i++) it[i] = c_parked;
+              return;
+            }
+
+            // Wake: full green (or selected wake color).
+            if (distance > start && distance <= wake) {
+              for (int i = 0; i < n; i++) it[i] = c_wake;
+              return;
+            }
+
+            // Active range: selected effect.
+            const int span = std::max(1, (int) (start - park));
+            const std::string effect = std::string(id(led_effect).current_option());
+            int number_to_light = 1;
+
+            if (effect == "Out-In" || effect == "In-Out") {
+              const int interval = std::max(1, span / half);
+              number_to_light = (int) ((start - distance) / interval);
+              number_to_light = std::max(1, std::min(half, number_to_light));
+            } else if (effect == "Full-Strip" || effect == "Full-Strip-Inv") {
+              const int interval = std::max(1, span / n);
+              number_to_light = (int) ((start - distance) / interval);
+              number_to_light = std::max(1, std::min(n, number_to_light));
+            }
+
+            if (effect == "Out-In") {
+              for (int i = 0; i < number_to_light; i++) {
+                it[i] = c_active;
+                it[n - 1 - i] = c_active;
+              }
+            } else if (effect == "In-Out") {
+              int left = n / 2;
+              int right = left;
+              if ((left % 2) == 0) left--;
+              for (int i = 0; i < number_to_light; i++) {
+                const int li = left - i;
+                const int ri = right + i;
+                if (li >= 0) it[li] = c_active;
+                if (ri < n) it[ri] = c_active;
+              }
+            } else if (effect == "Full-Strip") {
+              for (int i = 0; i < number_to_light; i++) it[i] = c_active;
+            } else if (effect == "Full-Strip-Inv") {
+              for (int i = 0; i < number_to_light; i++) it[n - 1 - i] = c_active;
+            } else if (effect == "Solid") {
+              // The original Solid effect follows the same color stages.
+              if (distance > start && distance <= wake) {
+                for (int i = 0; i < n; i++) it[i] = c_wake;
+              } else if (distance > park && distance <= start) {
+                for (int i = 0; i < n; i++) it[i] = c_active;
+              } else if (distance > backup && distance <= park) {
+                for (int i = 0; i < n; i++) it[i] = c_parked;
+              }
+            }
+    web_server:
+      sorting_weight: 10
+      sorting_group_id: pa_strip
+
+time:
+  - platform: sntp
+    id: pa_time
+    timezone: Europe/Prague
+    servers:
+      - ntp.nic.cz
+      - 0.pool.ntp.org
+      - 1.pool.ntp.org
+
+interval:
+  # This is the equivalent of the original ~200 ms main loop timing.
+  - interval: 200ms
+    then:
+      - lambda: |-
+          const uint32_t now = millis();
+          const float distance = id(parking_distance_raw).state;
+          const float wake = id(wake_distance).state;
+          const bool door_open = id(door_state).state;
+
+          // Store every 200 ms measurement. The value exposed to HA is
+          // published only once per second as the median of the last five
+          // valid measurements. Parking/LED logic continues to use the raw
+          // measurement for fast response.
+          if (!isnan(distance)) {
+            id(distance_samples)[id(distance_sample_index)] = distance;
+            id(distance_sample_index) = (id(distance_sample_index) + 1) % 5;
+            if (id(distance_sample_count) < 5) {
+              id(distance_sample_count)++;
+            }
+
+            if (id(distance_sample_count) >= 5 &&
+                (now - id(distance_publish_ms) >= 1000 || id(distance_publish_ms) == 0)) {
+              float values[5];
+              for (int i = 0; i < 5; i++) {
+                values[i] = id(distance_samples)[i];
+              }
+              for (int i = 1; i < 5; i++) {
+                float v = values[i];
+                int j = i - 1;
+                while (j >= 0 && values[j] > v) {
+                  values[j + 1] = values[j];
+                  j--;
+                }
+                values[j + 1] = v;
+              }
+              id(parking_distance).publish_state(values[2]);
+              id(distance_publish_ms) = now;
+            }
+          }
+
+          // Car detection runs continuously, regardless of the garage door state.
+          // PA Door State only enables/disables the parking LED state machine.
+          if (door_open != id(previous_door_state)) {
+            id(previous_door_state) = door_open;
+          }
+
+          // The parking LED state machine is idle while the garage door is closed,
+          // but Car Detected continues to be evaluated below.
+          if (!door_open) {
+            id(is_awake) = false;
+            id(exit_sleep_timer_started) = false;
+            id(park_sleep_timer_started) = false;
+            id(blink_on) = false;
+          }
+
+          // Do not run parking LED timing during the boot animation.
+          const bool booting = id(boot_animation);
+
+          // Car detection is always active, regardless of the garage door state.
+          // Only the parking LED state machine depends on PA Door State.
+          if (distance <= wake) {
+            id(no_car_detected_counter) = 0;
+            if (!id(car_detected_state)) {
+              id(car_detected_counter)++;
+            }
+
+            if (id(car_detected_counter) > 3) {
+              id(car_detected_counter) = 0;
+              id(car_detected_state) = true;
+
+              if (door_open && !booting) {
+                id(exit_sleep_timer_started) = false;
+                id(park_sleep_timer_started) = true;
+                id(start_time_ms) = now;
+                id(is_awake) = true;
+              }
+            }
+          } else {
+            id(car_detected_counter) = 0;
+            if (id(car_detected_state)) {
+              id(no_car_detected_counter)++;
+            }
+
+            if (id(no_car_detected_counter) > 10) {
+              id(car_detected_state) = false;
+              id(no_car_detected_counter) = 0;
+
+              if (door_open && !booting) {
+                if (!id(exit_sleep_timer_started)) {
+                  id(exit_sleep_timer_started) = true;
+                  id(park_sleep_timer_started) = false;
+                  id(start_time_ms) = now;
+                }
+              }
+            }
+          }
+
+          if (!booting && door_open) {
+            // Same timer behavior as the Arduino version.
+            const uint32_t elapsed = now - id(start_time_ms);
+            if ((id(park_sleep_timer_started) &&
+                 elapsed > (uint32_t) (id(max_operation_time_park).state * 1000.0f)) ||
+                (id(exit_sleep_timer_started) &&
+                 elapsed > (uint32_t) (id(max_operation_time_exit).state * 1000.0f))) {
+              id(is_awake) = false;
+              id(start_time_ms) = now;
+              id(exit_sleep_timer_started) = false;
+              id(park_sleep_timer_started) = false;
+            }
+
+            // Flash state is toggled at the same ~200 ms cadence as the old loop.
+            id(blink_on) = !id(blink_on);
+
+            // Set brightness only when the desired operating state changes.
+            const int desired_brightness = id(is_awake)
+                ? (int) id(active_brightness).state
+                : (int) id(sleep_brightness).state;
+
+            if (id(led_output_brightness) != desired_brightness) {
+              id(led_output_brightness) = desired_brightness;
+              auto call = id(led_strip).turn_on();
+              call.set_brightness(desired_brightness / 255.0f);
+              call.set_effect("Parking Assistant");
+              call.perform();
+            }
+          }
