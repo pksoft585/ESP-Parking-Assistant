@@ -25,4 +25,7 @@ Full step-by-step build instructions, including parts lists, wiring diagrams and
 
 **EspHome ESP32 S2**
 A version that uses the EspHome environment to simplify integration with Home Assistant. Except for the LED strip logic, everything in this environment is native, so there’s no need to program it.
+
+It uses a pinout compatible with the original Wemos D1 Mini, so no hardware changes are necessary. It can be easily modified for other compatible boards, such as the Wemos D1 Mini ESP32 and Lolin S3 Mini.
+
 Created with the help of ChatGPT—an algorithm for distance estimation and display on the LED strip.
