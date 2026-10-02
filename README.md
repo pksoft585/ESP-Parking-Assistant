@@ -23,8 +23,9 @@ Some key features of the system include:
 Full step-by-step build instructions, including parts lists, wiring diagrams and more can be found in my blog article: [A New Parking Assistant using an ESP8266 and WS2812b LEDs](https://resinchemtech.blogspot.com/2022/11/esp-parking-assistant.html)
 
 
-**EspHome ESP32 S2**
-A version that uses the EspHome environment to simplify integration with Home Assistant. Except for the LED strip logic, everything in this environment is native, so there’s no need to program it.
+
+## EspHome ESP32
+A version that uses the EspHome environment to simplify integration with Home Assistant. Except for the LED strip logic, everything in this environment is native, so there’s no need to program it. Version for the Lolin S2 Mini.
 
 It uses a pinout compatible with the original Wemos D1 Mini, so no hardware changes are necessary. It can be easily modified for other compatible boards, such as the Wemos D1 Mini ESP32 and Lolin S3 Mini.
 
