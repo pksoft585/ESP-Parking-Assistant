@@ -910,16 +910,22 @@ interval:
 
             // Flash state is toggled at the same ~200 ms cadence as the old loop.
             id(blink_on) = !id(blink_on);
-
-            // Set brightness only when the desired operating state changes.
+          }
+          
+          // Brightness must also be maintained in standby with the door closed.
+          if (!booting) {
             const int desired_brightness = id(is_awake)
                 ? (int) id(active_brightness).state
                 : (int) id(sleep_brightness).state;
-
-            if (id(led_output_brightness) != desired_brightness) {
+          
+            const float desired = desired_brightness / 255.0f;
+            const float current = id(led_strip).current_values.get_brightness();
+          
+            if (id(led_output_brightness) != desired_brightness ||
+                fabsf(current - desired) > 0.001f) {
               id(led_output_brightness) = desired_brightness;
               auto call = id(led_strip).turn_on();
-              call.set_brightness(desired_brightness / 255.0f);
+              call.set_brightness(desired);
               call.set_effect("Parking Assistant");
               call.perform();
             }
